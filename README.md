@@ -1,2 +1,3 @@
 # RMYATOLAUNCHER
-RUS LAUNCHER MINECRAFT
+
+Проект делал rmyatochnik
