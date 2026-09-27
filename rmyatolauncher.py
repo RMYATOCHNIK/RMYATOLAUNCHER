@@ -26,15 +26,23 @@ TEXT_MUTED = "#888888"
 def get_launch_version_id(game_path, mc_version, loader):
     loader = loader.lower()
     versions_dir = os.path.join(game_path, "versions")
-    
-    if loader == "vanilla":
-        v_path = os.path.join(versions_dir, mc_version)
-        return mc_version if os.path.exists(v_path) else None
 
-    if os.path.exists(versions_dir):
-        for folder in os.listdir(versions_dir):
-            folder_lower = folder.lower()
-            if mc_version in folder and loader in folder_lower:
+    if not os.path.exists(versions_dir):
+        return None
+
+    if loader == "vanilla":
+        json_file = os.path.join(versions_dir, mc_version, f"{mc_version}.json")
+        return mc_version if os.path.isfile(json_file) else None
+
+    for folder in os.listdir(versions_dir):
+        folder_path = os.path.join(versions_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        folder_lower = folder.lower()
+        if mc_version in folder and loader in folder_lower:
+            json_file = os.path.join(folder_path, f"{folder}.json")
+            if os.path.isfile(json_file):
                 return folder
 
     return None
@@ -67,7 +75,7 @@ class CreateProfileDialog(QDialog):
         form.setSpacing(10)
 
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Например: Мой Forge 1.12.2")
+        self.name_input.setPlaceholderText("Например: Мой Forge 1.7.10")
 
         self.version_combo = QComboBox()
         self.version_combo.addItems(available_versions)
@@ -88,6 +96,7 @@ class CreateProfileDialog(QDialog):
             QPushButton {{
                 background: {PURPLE}; color: white; font-weight: bold; 
                 border-radius: 10px; font-size: 14px;
+                padding: 0px; margin: 0px; text-align: center;
             }}
             QPushButton:hover {{ background: {ACCENT_HOVER}; }}
         """)
@@ -130,15 +139,20 @@ class InstallWorker(QThread):
             mll.install.install_minecraft_version(self.version, self.path, callback=callback)
 
             if self.loader_type == "forge":
-                update_s("Поиск и установка Forge...")
+                update_s("Поиск подходящей версии Forge...")
                 try:
                     forge_version = mll.forge.find_forge_version(self.version)
                     if forge_version:
+                        update_s(f"Установка {forge_version}...")
                         mll.forge.install_forge_version(forge_version, self.path, callback=callback)
                     else:
                         update_s("Forge для этой версии не найден!")
+                        self.finished.emit(False)
+                        return
                 except Exception as e:
                     update_s(f"Ошибка установки Forge: {e}")
+                    self.finished.emit(False)
+                    return
 
             elif self.loader_type == "fabric":
                 update_s("Установка Fabric...")
@@ -146,6 +160,8 @@ class InstallWorker(QThread):
                     mll.fabric.install_fabric(self.version, self.path, callback=callback)
                 except Exception as e:
                     update_s(f"Ошибка установки Fabric: {e}")
+                    self.finished.emit(False)
+                    return
 
             self.finished.emit(True)
         except Exception as e:
@@ -198,7 +214,7 @@ class ModDownloadWorker(QThread):
         try:
             self.status_signal.emit("Поиск версии мода...")
             versions_url = f"https://api.modrinth.com/v2/project/{self.project_id}/version"
-            
+
             params = {
                 "game_versions": f'["{self.game_version}"]',
                 "loaders": f'["{self.loader_type}"]'
@@ -294,7 +310,7 @@ class GameLaunchWorker(QThread):
 class RmyatoLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.base_path = os.path.join(os.getenv('APPDATA'), '.rmlauncher')
+        self.base_path = os.path.join(os.getenv('APPDATA'), '.rmyatolauncher')
         self.profiles_file = os.path.join(self.base_path, "profiles.json")
         os.makedirs(self.base_path, exist_ok=True)
 
@@ -318,7 +334,7 @@ class RmyatoLauncher(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(1000, 600)
-        
+
         if os.path.exists("rmyatolauncher.ico"):
             self.setWindowIcon(QIcon("rmyatolauncher.ico"))
 
@@ -328,12 +344,20 @@ class RmyatoLauncher(QMainWindow):
         self.refresh_profile_box()
         self.fade_in()
 
+    def fade_in(self):
+        self.setWindowOpacity(0.0)
+        self.anim = QPropertyAnimation(self, b"windowOpacity")
+        self.anim.setDuration(300)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
+
     def fetch_available_versions(self):
         try:
             all_v = mll.utils.get_version_list()
             self.available_versions = [v['id'] for v in all_v if v['type'] == 'release']
         except Exception:
-            self.available_versions = ["1.20.1", "1.12.2", "1.16.5"]
+            self.available_versions = ["1.20.1", "1.12.2", "1.16.5", "1.7.10"]
 
     def load_profiles(self):
         if os.path.exists(self.profiles_file):
@@ -362,7 +386,9 @@ class RmyatoLauncher(QMainWindow):
 
     def get_active_profile(self):
         active_name = self.profiles_data.get("active")
-        return self.profiles_data["list"].get(active_name, list(self.profiles_data["list"].values())[0])
+        if active_name in self.profiles_data["list"]:
+            return self.profiles_data["list"][active_name]
+        return list(self.profiles_data["list"].values())[0]
 
     def get_active_profile_path(self):
         p = self.get_active_profile()
@@ -422,7 +448,7 @@ class RmyatoLauncher(QMainWindow):
         body_layout.addLayout(sidebar, stretch=1)
 
         self.pages = QStackedWidget()
-        
+
         self.page_main = self.create_main_page()
         self.page_mods = self.create_mods_page()
         self.page_logs = self.create_logs_page()
@@ -440,7 +466,7 @@ class RmyatoLauncher(QMainWindow):
 
     def init_titlebar(self):
         title_bar = QHBoxLayout()
-        
+
         logo = QLabel("RMYATO LAUNCHER")
         logo.setStyleSheet(f"color: {PURPLE}; font-size: 18px; font-weight: 900; letter-spacing: 2px; border: none;")
         title_bar.addWidget(logo)
@@ -514,11 +540,11 @@ class RmyatoLauncher(QMainWindow):
 
         card_layout.addWidget(QLabel("Активная сборка:"))
         prof_layout = QHBoxLayout()
-        
+
         self.profile_combo = QComboBox()
         self.profile_combo.setStyleSheet(f"QComboBox {{ background: #0A0A0A; color: {PURPLE}; border: 1px solid {PURPLE}; padding: 10px; border-radius: 10px; font-weight: bold; }}")
         self.profile_combo.currentIndexChanged.connect(self.on_profile_changed)
-        
+
         btn_add_profile = QPushButton("Создать сборку")
         btn_add_profile.setStyleSheet(f"background: {PURPLE}; color: white; font-weight: bold; padding: 10px 15px; border-radius: 10px;")
         btn_add_profile.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -564,7 +590,13 @@ class RmyatoLauncher(QMainWindow):
         self.btn_main.setStyleSheet(f"""
             QPushButton {{ 
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {PURPLE}, stop:1 #6A1B9A); 
-                color: white; font-size: 22px; font-weight: bold; border-radius: 15px; 
+                color: white; 
+                font-size: 20px; 
+                font-weight: bold; 
+                border-radius: 15px;
+                padding: 0px;
+                margin: 0px;
+                text-align: center;
             }}
             QPushButton:hover {{ background: {ACCENT_HOVER}; }}
         """)
@@ -740,7 +772,7 @@ class RmyatoLauncher(QMainWindow):
             if data["name"] in self.profiles_data["list"]:
                 QMessageBox.warning(self, "Ошибка", "Сборка с таким названием уже существует!")
                 return
-            
+
             self.profiles_data["list"][data["name"]] = data
             self.profiles_data["active"] = data["name"]
             self.save_profiles()
@@ -802,25 +834,27 @@ class RmyatoLauncher(QMainWindow):
     def on_install_finished(self, success):
         self.pb.hide()
         self.btn_main.setEnabled(True)
-        self.check_status()
         if success:
+            self.check_status()
             p = self.get_active_profile()
             launch_id = get_launch_version_id(self.settings["game_path"], p["version"], p["loader"])
             if launch_id:
                 self.launch_game(launch_id)
+        else:
+            QMessageBox.critical(self, "Ошибка", "Произошла ошибка при установке файлов игры.")
 
     def launch_game(self, launch_id):
         p = self.get_active_profile()
-        username = self.nick.text().strip()
         profile_path = self.get_active_profile_path()
+        username = self.nick.text().strip() or "Player"
+        ram = self.settings["ram"]
+        window_size = (self.settings["width"], self.settings["height"])
 
-        self.log_message(f"[LAUNCHER] Запуск сборки '{p['name']}' ({launch_id})...")
         self.btn_main.setEnabled(False)
         self.st_label.setText("ИГРА ЗАПУСКАЕТСЯ...")
 
         self.launch_worker = GameLaunchWorker(
-            launch_id, self.settings["game_path"], profile_path, username,
-            self.settings["ram"], (self.settings["width"], self.settings["height"])
+            launch_id, self.settings["game_path"], profile_path, username, ram, window_size
         )
         self.launch_worker.log_signal.connect(self.log_message)
         self.launch_worker.finished_signal.connect(self.on_game_finished)
@@ -831,125 +865,85 @@ class RmyatoLauncher(QMainWindow):
         self.check_status()
 
     def new_mod_search(self):
+        query = self.search_input.text().strip()
+        self.mod_list_widget.clear()
         self.offset = 0
         self.has_more_mods = True
-        self.mod_list_widget.clear()
-        self.load_mods_online()
+        self.load_mods(query)
 
-    def load_mods_online(self):
+    def load_mods(self, query):
         if self.is_loading_mods or not self.has_more_mods:
             return
-
         self.is_loading_mods = True
-        query = self.search_input.text()
-        p = self.get_active_profile()
 
+        p = self.get_active_profile()
         self.mod_search_worker = ModSearchWorker(query, p["version"], p["loader"], self.limit, self.offset)
-        self.mod_search_worker.results_ready.connect(self.on_mods_loaded)
-        self.mod_search_worker.error_signal.connect(lambda e: self.log_message(f"[MOD ERROR] {e}"))
+        self.mod_search_worker.results_ready.connect(self.on_mods_fetched)
+        self.mod_search_worker.error_signal.connect(lambda e: self.log_message(f"[MOD SEARCH ERROR] {e}"))
         self.mod_search_worker.start()
 
-    def on_mods_loaded(self, hits, has_more):
-        self.has_more_mods = has_more
-        if not hits and self.offset == 0:
-            self.mod_list_widget.addItem("Ничего не найдено.")
-        else:
-            for mod in hits:
-                item = QListWidgetItem(f"{mod['title']}\n{mod['description']}")
-                item.setData(Qt.ItemDataRole.UserRole, mod['project_id'])
-                self.mod_list_widget.addItem(item)
-
-        self.offset += self.limit
+    def on_mods_fetched(self, hits, has_more):
         self.is_loading_mods = False
+        self.has_more_mods = has_more
+        self.offset += len(hits)
+
+        for mod in hits:
+            item = QListWidgetItem()
+            title = mod.get("title", "Без названия")
+            desc = mod.get("description", "Описание отсутствует.")
+            item.setText(f"{title}\n{desc}")
+            item.setData(Qt.ItemDataRole.UserRole, mod.get("project_id"))
+            self.mod_list_widget.addItem(item)
 
     def check_mod_scroll(self, value):
-        scrollbar = self.mod_list_widget.verticalScrollBar()
-        if value >= scrollbar.maximum() - 5:
-            self.load_mods_online()
+        if value >= self.mod_list_widget.verticalScrollBar().maximum() - 2:
+            query = self.search_input.text().strip()
+            self.load_mods(query)
 
     def download_selected_mod(self):
-        selected = self.mod_list_widget.currentItem()
-        if not selected:
-            return
-        project_id = selected.data(Qt.ItemDataRole.UserRole)
-        if not project_id:
+        selected_item = self.mod_list_widget.currentItem()
+        if not selected_item:
+            QMessageBox.warning(self, "Внимание", "Выберите мод из списка!")
             return
 
+        project_id = selected_item.data(Qt.ItemDataRole.UserRole)
         p = self.get_active_profile()
         profile_path = self.get_active_profile_path()
 
-        self.st_label.setText("СКАЧИВАНИЕ МОДА...")
-
+        self.st_label.setText("Загрузка мода...")
         self.mod_dl_worker = ModDownloadWorker(project_id, p["version"], p["loader"], profile_path)
-        self.mod_dl_worker.status_signal.connect(self.log_message)
+        self.mod_dl_worker.status_signal.connect(self.st_label.setText)
         self.mod_dl_worker.finished_signal.connect(self.on_mod_download_finished)
         self.mod_dl_worker.start()
 
     def on_mod_download_finished(self, success, message):
-        self.st_label.setText("ГОТОВ К ИГРЕ")
+        self.check_status()
         if success:
-            QMessageBox.information(self, "Мод загружен", message)
+            QMessageBox.information(self, "Успех", message)
             self.refresh_installed_mods()
         else:
-            QMessageBox.warning(self, "Ошибка мода", message)
+            QMessageBox.warning(self, "Ошибка", message)
 
     def refresh_installed_mods(self):
         self.local_mods_widget.clear()
         mods_dir = os.path.join(self.get_active_profile_path(), "mods")
-        if not os.path.exists(mods_dir):
-            return
-
-        files = [f for f in os.listdir(mods_dir) if f.endswith(".jar")]
-        if not files:
-            self.local_mods_widget.addItem("В этой сборке еще нет модов.")
-            return
-
-        for file in files:
-            item = QListWidgetItem(f"{file}")
-            item.setData(Qt.ItemDataRole.UserRole, file)
-            self.local_mods_widget.addItem(item)
+        if os.path.exists(mods_dir):
+            for file in os.listdir(mods_dir):
+                if file.endswith(".jar"):
+                    self.local_mods_widget.addItem(file)
 
     def delete_selected_mod(self):
-        selected = self.local_mods_widget.currentItem()
-        if not selected:
+        item = self.local_mods_widget.currentItem()
+        if not item:
             return
-        filename = selected.data(Qt.ItemDataRole.UserRole)
-        if not filename:
-            return
-
+        filename = item.text()
         file_path = os.path.join(self.get_active_profile_path(), "mods", filename)
         if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                QMessageBox.information(self, "Удалено", f"Мод {filename} удален.")
-                self.refresh_installed_mods()
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить: {e}")
-
-    def fade_in(self):
-        self.setWindowOpacity(0.0)
-        self.anim = QPropertyAnimation(self, b"windowOpacity")
-        self.anim.setDuration(400)
-        self.anim.setStartValue(0.0)
-        self.anim.setEndValue(1.0)
-        self.anim.start()
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.old_pos = e.globalPosition().toPoint()
-
-    def mouseMoveEvent(self, e):
-        if hasattr(self, "old_pos"):
-            delta = QPoint(e.globalPosition().toPoint() - self.old_pos)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = e.globalPosition().toPoint()
+            os.remove(file_path)
+            self.refresh_installed_mods()
 
 
 if __name__ == "__main__":
-    if os.name == 'nt':
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("rmyato.launcher.2.0")
-
     app = QApplication(sys.argv)
     window = RmyatoLauncher()
     window.show()
